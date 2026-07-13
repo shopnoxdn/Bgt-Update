@@ -67,3 +67,4 @@ externalPort = 80
 [userenv.shared]
 TELEGRAM_API_ID = "31955122"
 ADMIN_CHAT_ID = "5810613583"
+MAIL_DOMAIN = "sopnox.store"
