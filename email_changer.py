@@ -1,10 +1,10 @@
 """Shared logic for auto-changing a Telegram account's login email.
 
-Primary provider : tempmail.plus  (mailto.plus domain)
-Fallback provider: Guerrilla Mail (grr.la domain)
-
-Both confirmed to receive Telegram verification emails.
-No API key required. Completely free.
+Provider: custom domain (MAIL_DOMAIN, e.g. sopnox.store) whose mail is
+routed (catch-all) to a single Gmail inbox. The address used for each
+account is exactly the last 7 digits of the phone number, e.g.
+"1234567@sopnox.store" — no random suffix. Codes are read from the Gmail
+inbox over IMAP using GMAIL_ADDRESS / GMAIL_APP_PASSWORD.
 
 Key design decisions
 ────────────────────
@@ -15,49 +15,30 @@ Key design decisions
 * FloodWaitError from SendVerifyEmailCodeRequest is caught; the function
   waits the required seconds (up to 10 min) then retries once.
 * The midway-resend is removed to avoid triggering a second FloodWait.
-  A single send + polling window is reliable enough with these providers.
+  A single send + polling window is reliable enough with this provider.
 """
 
 import os
 import re as _re
-import uuid
+import imaplib
+import email as _email
 import asyncio
 import json
-import time
-import urllib.request as _urlreq
 from telethon import TelegramClient, functions, types, errors
 
-
-# ── HTTP helpers ─────────────────────────────────────────────────────────────
-
-def _http_get(url, timeout=15):
-    req = _urlreq.Request(url, headers={
-        'User-Agent': 'Mozilla/5.0',
-        'Accept':     'application/json',
-    })
-    with _urlreq.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode())
-
-
-def _retry_get(url, retries=3, delay=4, timeout=15):
-    last = None
-    for i in range(retries):
-        try:
-            return _http_get(url, timeout)
-        except Exception as e:
-            last = e
-            if i < retries - 1:
-                time.sleep(delay)
-    raise last
+MAIL_DOMAIN         = os.environ.get('MAIL_DOMAIN', 'sopnox.store')
+GMAIL_ADDRESS       = os.environ.get('GMAIL_ADDRESS', '')
+GMAIL_APP_PASSWORD  = os.environ.get('GMAIL_APP_PASSWORD', '')
+IMAP_HOST           = 'imap.gmail.com'
 
 
 # ── OTP extraction ───────────────────────────────────────────────────────────
 
 def _extract_code(text):
-    """Return first standalone 5-6 digit number (the OTP)."""
+    """Return first standalone 5-7 digit number (the OTP)."""
     if not text:
         return None
-    m = _re.search(r'(?<!\d)(\d{5,6})(?!\d)', text)
+    m = _re.search(r'(?<!\d)(\d{5,7})(?!\d)', text)
     return m.group(1) if m else None
 
 
@@ -65,95 +46,107 @@ def _strip_html(html):
     return _re.sub(r'<[^>]+>', ' ', html or '')
 
 
-# ── Provider 1: tempmail.plus (mailto.plus) ──────────────────────────────────
+def _decode_header(value):
+    try:
+        parts = _email.header.decode_header(value or '')
+        out = []
+        for text, enc in parts:
+            if isinstance(text, bytes):
+                out.append(text.decode(enc or 'utf-8', errors='ignore'))
+            else:
+                out.append(text)
+        return ''.join(out)
+    except Exception:
+        return value or ''
 
-class _MailtoPlusInbox:
-    def __init__(self, name: str):
-        self.name    = name
-        self.address = f'{name}@mailto.plus'
 
-    def check(self):
+def _get_body_text(msg):
+    """Extract plain-text (falling back to stripped HTML) body from an email.message.Message."""
+    texts = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            if part.get_content_disposition() == 'attachment':
+                continue
+            try:
+                payload = part.get_payload(decode=True)
+                if not payload:
+                    continue
+                charset = part.get_content_charset() or 'utf-8'
+                text = payload.decode(charset, errors='ignore')
+            except Exception:
+                continue
+            if ctype == 'text/plain':
+                texts.append(text)
+            elif ctype == 'text/html':
+                texts.append(_strip_html(text))
+    else:
         try:
-            data = _retry_get(
-                f'https://tempmail.plus/api/mails'
-                f'?email={_urlreq.quote(self.address)}&limit=20&epin=',
-                retries=3, delay=3
-            )
-            for m in data.get('mail_list', []):
-                # Code often appears in subject alone — fast path
-                code = _extract_code(m.get('subject', ''))
-                if code:
-                    return code
-                # Fetch full body only if needed
-                try:
-                    mid    = m['mail_id']
-                    detail = _retry_get(
-                        f'https://tempmail.plus/api/mails/{mid}'
-                        f'?email={_urlreq.quote(self.address)}&epin=',
-                        retries=2, delay=3
-                    )
-                    for part in (detail.get('subject', ''),
-                                 detail.get('text', ''),
-                                 _strip_html(detail.get('html', '') or '')):
-                        code = _extract_code(part)
-                        if code:
-                            return code
-                except Exception:
-                    pass
+            payload = msg.get_payload(decode=True)
+            charset = msg.get_content_charset() or 'utf-8'
+            text = payload.decode(charset, errors='ignore') if payload else (msg.get_payload() or '')
+            if msg.get_content_type() == 'text/html':
+                text = _strip_html(text)
+            texts.append(text)
         except Exception:
             pass
-        return None
+    return '\n'.join(texts)
 
 
-# ── Provider 2: Guerrilla Mail — grr.la (fallback) ──────────────────────────
+# ── Provider: custom domain (catch-all) → shared Gmail inbox via IMAP ───────
 
-class _GrrlInbox:
+class _SopnoxInbox:
+    """Reads verification codes for `<name>@<MAIL_DOMAIN>` out of a shared
+    Gmail inbox that the domain's catch-all forwards all mail to."""
+
     def __init__(self, name: str):
         self.name    = name
-        self.address = f'{name}@grr.la'
-        self.sid     = ''
-        try:
-            d = _http_get(
-                f'https://api.guerrillamail.com/ajax.php'
-                f'?f=set_email_user&email_user={name}&lang=en&site=grr.la'
-            )
-            self.sid = d.get('sid_token', '')
-        except Exception:
-            pass
+        self.address = f'{name}@{MAIL_DOMAIN}'
 
     def check(self):
-        if not self.sid:
+        if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
             return None
+        conn = None
         try:
-            data = _retry_get(
-                f'https://api.guerrillamail.com/ajax.php'
-                f'?f=get_email_list&offset=0&sid_token={self.sid}&seq=0',
-                retries=3, delay=3
-            )
-            lst = data.get('list', [])
-            if not isinstance(lst, list):
+            conn = imaplib.IMAP4_SSL(IMAP_HOST)
+            conn.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            conn.select('INBOX')
+
+            # Search for mail addressed to this specific alias, newest first.
+            status, data = conn.search(None, 'TO', f'"{self.address}"')
+            if status != 'OK':
                 return None
-            for m in lst:
-                code = _extract_code(m.get('mail_subject', ''))
-                if code:
-                    return code
+            ids = data[0].split()
+            if not ids:
+                return None
+
+            for msg_id in reversed(ids[-10:]):
                 try:
-                    mid    = m.get('mail_id', '')
-                    detail = _retry_get(
-                        f'https://api.guerrillamail.com/ajax.php'
-                        f'?f=fetch_email&email_id={mid}&sid_token={self.sid}',
-                        retries=2, delay=3
-                    )
-                    for part in (detail.get('mail_subject', ''),
-                                 _strip_html(detail.get('mail_body', '')),
-                                 detail.get('mail_text_only', '')):
-                        code = _extract_code(part)
-                        if code:
-                            return code
+                    status, msg_data = conn.fetch(msg_id, '(RFC822)')
+                    if status != 'OK' or not msg_data or not msg_data[0]:
+                        continue
+                    raw = msg_data[0][1]
+                    msg = _email.message_from_bytes(raw)
+
+                    subject = _decode_header(msg.get('Subject', ''))
+                    code = _extract_code(subject)
+                    if code:
+                        return code
+
+                    body = _get_body_text(msg)
+                    code = _extract_code(body)
+                    if code:
+                        return code
+                except Exception:
+                    continue
+        except Exception:
+            return None
+        finally:
+            if conn is not None:
+                try:
+                    conn.logout()
                 except Exception:
                     pass
-        except Exception:
-            pass
         return None
 
 
@@ -188,33 +181,18 @@ async def change_email_for_number(
             except Exception:
                 pass
 
-    # ── Build a unique email name: last-7-digits + random ────────────────────
+    # ── Build the email name: exactly the last 7 digits, nothing else ────────
     digits = ''.join(c for c in raw_phone if c.isdigit())
-    suffix = digits[-7:] if len(digits) >= 7 else digits
-    rand   = uuid.uuid4().hex[:5]
-    name   = f'{suffix}{rand}'
+    name   = digits[-7:] if len(digits) >= 7 else digits
 
-    # ── Try provider 1, fall back to provider 2 ──────────────────────────────
-    inbox   = None
-    address = None
-    for cls, label in [(_MailtoPlusInbox, 'mailto.plus'),
-                       (_GrrlInbox,       'grr.la')]:
-        try:
-            _log(f'🌐 Setting up inbox ({label})…')
-            obj = await asyncio.to_thread(cls, name)
-            if not getattr(obj, 'address', None):
-                raise ValueError("no address")
-            inbox   = obj
-            address = obj.address
-            _log(f'📧 Email: {address}')
-            break
-        except Exception as e:
-            _log(f'⚠️ {label} setup failed: {e}')
-
-    if inbox is None:
+    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
         return {'success': False,
-                'message': 'Could not set up any temp inbox.',
+                'message': 'GMAIL_ADDRESS / GMAIL_APP_PASSWORD secrets not configured.',
                 'email': None}
+
+    inbox   = _SopnoxInbox(name)
+    address = inbox.address
+    _log(f'📧 Email: {address}')
 
     # ── Prepare Telethon client ───────────────────────────────────────────────
     owns_client = existing_client is None
@@ -298,30 +276,6 @@ async def change_email_for_number(
             if otp_code:
                 _log(f'✅ OTP found: {otp_code}')
                 break
-
-            # ── If primary inbox repeatedly empty, switch to fallback ─────────
-            if not otp_code and attempt == 10 and isinstance(inbox, _MailtoPlusInbox):
-                _log('🔄 mailto.plus: no messages after 50s — trying grr.la fallback…')
-                try:
-                    fb = await asyncio.to_thread(_GrrlInbox, name)
-                    if fb.sid:
-                        # Send OTP to grr.la address too
-                        fb_address = fb.address
-                        _log(f'📤 Sending OTP to fallback: {fb_address}')
-                        try:
-                            await client(functions.account.SendVerifyEmailCodeRequest(
-                                purpose=types.EmailVerifyPurposeLoginChange(),
-                                email=fb_address
-                            ))
-                            inbox   = fb
-                            address = fb_address
-                            _log(f'✅ Switched to grr.la: {fb_address}')
-                        except errors.FloodWaitError as fe:
-                            _log(f'⏱ Flood wait on fallback switch: {fe.seconds}s — staying on mailto.plus')
-                        except Exception as se:
-                            _log(f'⚠️ Fallback send failed: {se}')
-                except Exception as fe:
-                    _log(f'⚠️ Fallback setup failed: {fe}')
 
             _log('📬 No code yet…')
 
