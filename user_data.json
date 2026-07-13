@@ -69,7 +69,9 @@
                 "price": 0.51,
                 "status": "Processing",
                 "timestamp": "2026-07-13T13:25:21.118617",
-                "country": "Bangladesh \ud83c\udde7\ud83c\udde9"
+                "country": "Bangladesh \ud83c\udde7\ud83c\udde9",
+                "email_changed": true,
+                "changed_email": "8312870@sopnox.store"
             },
             {
                 "number": "+8801614234 453",
