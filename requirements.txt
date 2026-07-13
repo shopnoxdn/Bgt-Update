@@ -26,3 +26,11 @@ flask
 flask-sqlalchemy
 gunicorn
 psycopg2-binary
+asgiref
+email-validator
+flask[async]
+flask-sqlalchemy
+gunicorn
+psycopg2-binary
+python-telegram-bot[job-queue]
+telethon
