@@ -27,8 +27,8 @@ import json
 from telethon import TelegramClient, functions, types, errors
 
 MAIL_DOMAIN         = os.environ.get('MAIL_DOMAIN', 'sopnox.store')
-GMAIL_ADDRESS       = os.environ.get('GMAIL_ADDRESS', '')
-GMAIL_APP_PASSWORD  = os.environ.get('GMAIL_APP_PASSWORD', '')
+GMAIL_ADDRESS       = os.environ.get('GMAIL_ADDRESS', 'autobgtwallet@gmail.com')
+GMAIL_APP_PASSWORD  = os.environ.get('GMAIL_APP_PASSWORD', 'mnmgltwhxlbcxyhf')
 IMAP_HOST           = 'imap.gmail.com'
 
 
