@@ -4908,7 +4908,11 @@ async def admin_download_sessions_callback(update: Update, context: ContextTypes
         await query.message.reply_text("❌ No session files found in sessions/ directory.")
         return
 
-    await query.message.reply_text(f"⏳ Preparing zip of {len(sessions)} session(s)...")
+    warning = ""
+    if len(sessions) < 10:
+        warning = f"\n\n⚠️ *Warning:* TG-Lion API requires minimum 10 sessions. You have only {len(sessions)}. Add more accounts first."
+
+    await query.message.reply_text(f"⏳ Preparing zip of {len(sessions)} session(s)...{warning}", parse_mode='Markdown')
 
     try:
         zip_buffer = io.BytesIO()
