@@ -4914,7 +4914,9 @@ async def admin_download_sessions_callback(update: Update, context: ContextTypes
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
             for phone_part, full_path in sessions:
-                zf.write(full_path, arcname=f"{phone_part}.session")
+                # Strip spaces so TG-Lion API accepts the filename
+                clean_phone = phone_part.replace(' ', '')
+                zf.write(full_path, arcname=f"{clean_phone}.session")
         zip_buffer.seek(0)
 
         await context.bot.send_document(
@@ -4945,10 +4947,11 @@ async def admin_country_sessions_callback(update: Update, context: ContextTypes.
 
     phone_country = _build_phone_country_map()
 
-    # Group by country
+    # Group by country (strip spaces from phone_part before lookup)
     country_phones: dict = {}
     for phone_part, _ in sessions:
-        country = phone_country.get(phone_part, 'Unknown')
+        clean_phone = phone_part.replace(' ', '')
+        country = phone_country.get(clean_phone, 'Unknown')
         if country not in country_phones:
             country_phones[country] = []
         country_phones[country].append(phone_part)
@@ -5003,7 +5006,8 @@ async def admin_dl_country_callback(update: Update, context: ContextTypes.DEFAUL
 
     matched = []
     for phone_part, full_path in sessions:
-        country = phone_country.get(phone_part, 'Unknown')
+        clean_phone = phone_part.replace(' ', '')
+        country = phone_country.get(clean_phone, 'Unknown')
         country_key = country.replace('|', '_')[:40]
         if country_key == selected_country:
             matched.append((phone_part, full_path))
@@ -5019,7 +5023,8 @@ async def admin_dl_country_callback(update: Update, context: ContextTypes.DEFAUL
         safe_name = re.sub(r'[^\w\s-]', '', selected_country).strip().replace(' ', '_')
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
             for phone_part, full_path in matched:
-                zf.write(full_path, arcname=f"{phone_part}.session")
+                clean_phone = phone_part.replace(' ', '')
+                zf.write(full_path, arcname=f"{clean_phone}.session")
         zip_buffer.seek(0)
 
         await context.bot.send_document(
