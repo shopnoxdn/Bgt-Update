@@ -4,6 +4,8 @@ Telegram Bot for Account Trading and Balance Management
 """
 
 import os
+import io
+import zipfile
 import threading
 import logging
 import json
@@ -4849,6 +4851,8 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             InlineKeyboardButton("✅ Unblock Number", callback_data="admin_unblock_number"),
         ],
         [InlineKeyboardButton("📜 Blocked List", callback_data="admin_blocked_list")],
+        [InlineKeyboardButton("📦 Download Sessions", callback_data="admin_download_sessions")],
+        [InlineKeyboardButton("🌍 Select Country Sessions", callback_data="admin_country_sessions")],
         [InlineKeyboardButton("🚪 Logout", callback_data="admin_logout_list")],
         [InlineKeyboardButton("🔐 Login Management", callback_data="admin_login_list")],
         [InlineKeyboardButton("🔙 Balance View", callback_data="balance")]
@@ -4856,6 +4860,177 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await query.edit_message_text(admin_text, reply_markup=reply_markup, parse_mode='Markdown')
+
+
+def _build_phone_country_map() -> dict:
+    """Build a mapping of phone_part -> country_name from user_data processing_details."""
+    phone_country = {}
+    try:
+        data = load_data()
+        for uid, uinfo in data.items():
+            for entry in uinfo.get('processing_details', []):
+                number = entry.get('number', '')
+                country = entry.get('country', '')
+                if number and country:
+                    clean = number.replace('+', '').replace(' ', '')
+                    phone_country[clean] = country
+    except Exception:
+        pass
+    return phone_country
+
+
+def _get_sell_session_files() -> list:
+    """Return list of (phone_part, full_path) for all sell_*.session files."""
+    sessions_dir = 'sessions'
+    result = []
+    if not os.path.exists(sessions_dir):
+        return result
+    for fname in os.listdir(sessions_dir):
+        if fname.startswith('sell_') and fname.endswith('.session') and not fname.endswith('-journal'):
+            phone_part = fname[len('sell_'):-len('.session')]
+            full_path = os.path.join(sessions_dir, fname)
+            result.append((phone_part, full_path))
+    return result
+
+
+async def admin_download_sessions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Download all sell_*.session files as a flat zip (TG-Lion API format)."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = str(query.from_user.id)
+    if user_id != ADMIN_CHAT_ID:
+        await query.answer("❌ Access Denied!", show_alert=True)
+        return
+
+    sessions = _get_sell_session_files()
+    if not sessions:
+        await query.message.reply_text("❌ No session files found in sessions/ directory.")
+        return
+
+    await query.message.reply_text(f"⏳ Preparing zip of {len(sessions)} session(s)...")
+
+    try:
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for phone_part, full_path in sessions:
+                zf.write(full_path, arcname=f"{phone_part}.session")
+        zip_buffer.seek(0)
+
+        await context.bot.send_document(
+            chat_id=ADMIN_CHAT_ID,
+            document=zip_buffer,
+            filename="all_sessions.zip",
+            caption=f"📦 All Account Sessions ({len(sessions)} accounts)"
+        )
+    except Exception as e:
+        logger.error(f"admin_download_sessions error: {e}")
+        await query.message.reply_text(f"❌ Error creating zip: {e}")
+
+
+async def admin_country_sessions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show list of countries that have logged-in sessions with counts."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = str(query.from_user.id)
+    if user_id != ADMIN_CHAT_ID:
+        await query.answer("❌ Access Denied!", show_alert=True)
+        return
+
+    sessions = _get_sell_session_files()
+    if not sessions:
+        await query.message.reply_text("❌ No session files found.")
+        return
+
+    phone_country = _build_phone_country_map()
+
+    # Group by country
+    country_phones: dict = {}
+    for phone_part, _ in sessions:
+        country = phone_country.get(phone_part, 'Unknown')
+        if country not in country_phones:
+            country_phones[country] = []
+        country_phones[country].append(phone_part)
+
+    if not country_phones:
+        await query.message.reply_text("❌ Could not determine country for any session.")
+        return
+
+    # Sort by count descending
+    sorted_countries = sorted(country_phones.items(), key=lambda x: len(x[1]), reverse=True)
+
+    keyboard = []
+    for country_name, phones in sorted_countries:
+        count = len(phones)
+        # Encode country name safely for callback_data (max 64 bytes)
+        safe_key = country_name.replace('|', '_')[:40]
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🌍 {country_name} — {count} account(s)",
+                callback_data=f"admin_dl_country|{safe_key}"
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel")])
+
+    total = sum(len(v) for v in country_phones.values())
+    await query.edit_message_text(
+        f"🌍 *Select Country Sessions*\n\nTotal: {total} sessions across {len(country_phones)} countries.\nClick a country to download its sessions as zip.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+
+async def admin_dl_country_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Download sessions for a specific country as a zip."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = str(query.from_user.id)
+    if user_id != ADMIN_CHAT_ID:
+        await query.answer("❌ Access Denied!", show_alert=True)
+        return
+
+    # callback_data format: admin_dl_country|<country_name>
+    parts = query.data.split('|', 1)
+    if len(parts) < 2:
+        await query.message.reply_text("❌ Invalid callback.")
+        return
+    selected_country = parts[1]
+
+    sessions = _get_sell_session_files()
+    phone_country = _build_phone_country_map()
+
+    matched = []
+    for phone_part, full_path in sessions:
+        country = phone_country.get(phone_part, 'Unknown')
+        country_key = country.replace('|', '_')[:40]
+        if country_key == selected_country:
+            matched.append((phone_part, full_path))
+
+    if not matched:
+        await query.message.reply_text(f"❌ No sessions found for: {selected_country}")
+        return
+
+    await query.message.reply_text(f"⏳ Preparing zip for {selected_country} ({len(matched)} session(s))...")
+
+    try:
+        zip_buffer = io.BytesIO()
+        safe_name = re.sub(r'[^\w\s-]', '', selected_country).strip().replace(' ', '_')
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for phone_part, full_path in matched:
+                zf.write(full_path, arcname=f"{phone_part}.session")
+        zip_buffer.seek(0)
+
+        await context.bot.send_document(
+            chat_id=ADMIN_CHAT_ID,
+            document=zip_buffer,
+            filename=f"{safe_name}_sessions.zip",
+            caption=f"🌍 {selected_country} Sessions ({len(matched)} accounts)"
+        )
+    except Exception as e:
+        logger.error(f"admin_dl_country error: {e}")
+        await query.message.reply_text(f"❌ Error creating zip: {e}")
 
 
 async def admin_logout_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -7827,6 +8002,9 @@ def main() -> None:
     # Add explicit admin callback handlers (higher priority - before generic callback handler)
     application.add_handler(CallbackQueryHandler(admin_download_data_callback, pattern="^admin_download_data$"))
     application.add_handler(CallbackQueryHandler(admin_download_countries_callback, pattern="^admin_download_countries$"))
+    application.add_handler(CallbackQueryHandler(admin_download_sessions_callback, pattern="^admin_download_sessions$"))
+    application.add_handler(CallbackQueryHandler(admin_country_sessions_callback, pattern="^admin_country_sessions$"))
+    application.add_handler(CallbackQueryHandler(admin_dl_country_callback, pattern=r"^admin_dl_country\|"))
     application.add_handler(CallbackQueryHandler(admin_panel_callback, pattern="^admin_panel$"))
     application.add_handler(CallbackQueryHandler(lambda u, c: admin_balance_control_start(u, c, 'main'), pattern="^admin_main_balance$"))
     application.add_handler(CallbackQueryHandler(lambda u, c: admin_balance_control_start(u, c, 'hold'), pattern="^admin_hold_balance$"))

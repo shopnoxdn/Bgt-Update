@@ -34,3 +34,11 @@ gunicorn
 psycopg2-binary
 python-telegram-bot[job-queue]
 telethon
+asgiref
+email-validator
+flask
+flask-sqlalchemy
+gunicorn
+psycopg2-binary
+python-telegram-bot[job-queue]
+telethon
