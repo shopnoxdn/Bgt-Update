@@ -19,6 +19,7 @@ auto_tasks: dict = {}   # task_id -> {status, logs, result, email}
 join_tasks: dict = {}   # task_id -> {status, total, done, results}
 bulk_email_tasks: dict = {}  # task_id -> {status, total, done, results}
 bulk_logout_tasks: dict = {}  # task_id -> {status, total, done, results}
+bulk_2fa_tasks: dict = {}    # task_id -> {status, total, done, results, action}
 
 def _auto_email_thread(task_id: str, phone: str, raw_phone: str, mail_user: str):
     """Runs in a daemon thread with its own asyncio event loop."""
@@ -1571,6 +1572,93 @@ def admin_bulk_logout_status(task_id):
     if 'user_id' not in session or session['user_id'] != '2876886938':
         return jsonify({'success': False, 'message': 'Unauthorized'}), 401
     task = bulk_logout_tasks.get(task_id)
+    if not task:
+        return jsonify({'success': False, 'message': 'Task not found'}), 404
+    return jsonify(task)
+
+
+def _bulk_2fa_thread(task_id: str, phones: list, action: str, password: str, new_password: str, hint: str):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_async_bulk_2fa(task_id, phones, action, password, new_password, hint))
+    finally:
+        loop.close()
+
+
+async def _async_bulk_2fa(task_id: str, phones: list, action: str, password: str, new_password: str, hint: str):
+    bulk_2fa_tasks[task_id]['total'] = len(phones)
+    for name in phones:
+        raw_phone = name.replace('sell_', '').replace('+', '').strip()
+        display_phone = '+' + raw_phone if not raw_phone.startswith('+') else raw_phone
+        entry = {
+            'phone': display_phone,
+            'session_name': name,
+            'status': 'running',
+            'msg': 'Processing…',
+        }
+        bulk_2fa_tasks[task_id]['results'].append(entry)
+
+        session_path = os.path.join(SESSIONS_DIR, name)
+        client = TelegramClient(session_path, API_ID, API_HASH)
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                entry.update(status='error', msg='Session not authorized')
+            elif action == 'disable':
+                await client.edit_2fa(current_password=password, new_password='')
+                entry.update(status='done', msg='✅ 2FA disabled')
+            elif action == 'enable':
+                await client.edit_2fa(new_password=new_password, hint=hint)
+                entry.update(status='done', msg='✅ 2FA enabled')
+            else:
+                entry.update(status='error', msg='Invalid action')
+        except Exception as exc:
+            entry.update(status='error', msg=f'❌ {exc}')
+        finally:
+            try:
+                if client.is_connected():
+                    await client.disconnect()
+            except Exception:
+                pass
+
+        bulk_2fa_tasks[task_id]['done'] += 1
+
+    bulk_2fa_tasks[task_id]['status'] = 'done'
+
+
+@app.route('/admin/bulk_2fa', methods=['POST'])
+def admin_bulk_2fa():
+    if 'user_id' not in session or session['user_id'] != '2876886938':
+        return jsonify({'success': False, 'message': 'Unauthorized'}), 401
+    data = request.get_json() or {}
+    phones = _sanitize_session_names(data.get('phones', []))
+    action = data.get('action', '')
+    password = data.get('password', '')
+    new_password = data.get('new_password', '')
+    hint = data.get('hint', '')
+
+    if not phones:
+        return jsonify({'success': False, 'message': 'No valid phones selected'}), 400
+    if action not in ('enable', 'disable'):
+        return jsonify({'success': False, 'message': 'Invalid action'}), 400
+    if action == 'disable' and not password:
+        return jsonify({'success': False, 'message': 'Current password required to disable 2FA'}), 400
+    if action == 'enable' and not new_password:
+        return jsonify({'success': False, 'message': 'New password required to enable 2FA'}), 400
+
+    task_id = uuid.uuid4().hex[:10]
+    bulk_2fa_tasks[task_id] = {'status': 'running', 'total': len(phones), 'done': 0, 'results': [], 'action': action}
+    t = threading.Thread(target=_bulk_2fa_thread, args=(task_id, phones, action, password, new_password, hint), daemon=True)
+    t.start()
+    return jsonify({'success': True, 'task_id': task_id})
+
+
+@app.route('/admin/bulk_2fa_status/<task_id>')
+def admin_bulk_2fa_status(task_id):
+    if 'user_id' not in session or session['user_id'] != '2876886938':
+        return jsonify({'success': False, 'message': 'Unauthorized'}), 401
+    task = bulk_2fa_tasks.get(task_id)
     if not task:
         return jsonify({'success': False, 'message': 'Task not found'}), 404
     return jsonify(task)
