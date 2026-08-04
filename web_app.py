@@ -1602,9 +1602,118 @@ async def admin_session_count(phone):
             await client.disconnect()
 
 
+# verify_session_tasks: task_id -> {status, total, done, results}
+verify_session_tasks: dict = {}
+
+
+def _is_safe_session_filename(fname: str) -> bool:
+    """Return True only if fname is a plain .session filename with no path tricks."""
+    fname = os.path.basename(fname)
+    return (
+        fname.endswith('.session')
+        and not fname.endswith('-journal')
+        and '..' not in fname
+        and '/' not in fname
+        and '\\' not in fname
+        and len(fname) > len('.session')
+    )
+
+
+def _save_session_bytes(fname: str, data: bytes, saved: list, errors: list):
+    fname = os.path.basename(fname)
+    dest = os.path.join(SESSIONS_DIR, fname)
+    try:
+        with open(dest, 'wb') as fh:
+            fh.write(data)
+        saved.append(fname)
+    except Exception as exc:
+        errors.append(f'{fname}: {exc}')
+
+
+def _extract_zip_sessions(file_storage, saved: list, errors: list):
+    """Read an uploaded ZIP and extract every valid .session entry from it."""
+    try:
+        raw = file_storage.read()
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            found = False
+            for zi in zf.infolist():
+                bname = os.path.basename(zi.filename)
+                if not bname:
+                    continue  # directory entry
+                if _is_safe_session_filename(bname):
+                    _save_session_bytes(bname, zf.read(zi.filename), saved, errors)
+                    found = True
+                # silently skip non-.session entries inside the ZIP
+            if not found:
+                errors.append(f'{file_storage.filename}: ZIP contains no .session files')
+    except zipfile.BadZipFile:
+        errors.append(f'{file_storage.filename}: not a valid ZIP file')
+    except Exception as exc:
+        errors.append(f'{file_storage.filename}: {exc}')
+
+
+def _run_verify_sessions(task_id: str, session_names: list):
+    """Background thread: connect to each session and check authorization."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_async_verify_sessions(task_id, session_names))
+    finally:
+        loop.close()
+
+
+async def _async_verify_sessions(task_id: str, session_names: list):
+    for name in session_names:
+        result_entry = {
+            'session_name': name,
+            'phone': name.replace('sell_', '+') if not name.startswith('+') else name,
+            'status': 'checking',
+            'authorized': None,
+            'msg': 'Checking…',
+        }
+        verify_session_tasks[task_id]['results'].append(result_entry)
+
+        session_path = os.path.join(SESSIONS_DIR, name)
+        client = TelegramClient(session_path, API_ID, API_HASH)
+        try:
+            await client.connect()
+            authorized = await client.is_user_authorized()
+            if authorized:
+                me = await client.get_me()
+                phone_str = ('+' + me.phone) if me and me.phone else name
+                result_entry.update(
+                    status='ok',
+                    authorized=True,
+                    phone=phone_str,
+                    msg='✅ Authorized',
+                )
+            else:
+                result_entry.update(
+                    status='error',
+                    authorized=False,
+                    msg='❌ Session expired / not authorized',
+                )
+        except Exception as exc:
+            result_entry.update(
+                status='error',
+                authorized=False,
+                msg=f'❌ {exc}',
+            )
+        finally:
+            try:
+                if client.is_connected():
+                    await client.disconnect()
+            except Exception:
+                pass
+
+        verify_session_tasks[task_id]['done'] += 1
+
+    verify_session_tasks[task_id]['status'] = 'done'
+
+
 @app.route('/admin/upload_session', methods=['POST'])
 def admin_upload_session():
-    """Upload one or more .session files into the sessions directory."""
+    """Upload .session files (individually or inside a ZIP) into the sessions directory."""
     if 'user_id' not in session or session['user_id'] != '2876886938':
         return jsonify({'success': False, 'message': 'Unauthorized'}), 401
 
@@ -1615,29 +1724,53 @@ def admin_upload_session():
     saved = []
     errors = []
     for f in files:
-        fname = f.filename or ''
-        # Accept only .session files; strip any path component
-        fname = os.path.basename(fname)
-        if not fname.endswith('.session'):
-            errors.append(f'{fname}: not a .session file')
-            continue
-        # Block path traversal
-        if '..' in fname or '/' in fname or '\\' in fname:
-            errors.append(f'{fname}: invalid filename')
-            continue
-        dest = os.path.join(SESSIONS_DIR, fname)
-        try:
-            f.save(dest)
-            saved.append(fname)
-        except Exception as e:
-            errors.append(f'{fname}: {e}')
+        fname = os.path.basename(f.filename or '')
+        if fname.endswith('.zip'):
+            _extract_zip_sessions(f, saved, errors)
+        elif _is_safe_session_filename(fname):
+            data = f.read()
+            _save_session_bytes(fname, data, saved, errors)
+        else:
+            errors.append(f'{fname}: only .session or .zip files are accepted')
+
+    # Kick off background verification for freshly saved sessions
+    task_id = None
+    if saved:
+        # Strip .session suffix to get session names
+        session_names = [s[:-8] for s in saved if s.endswith('.session')]
+        if session_names:
+            task_id = uuid.uuid4().hex[:10]
+            verify_session_tasks[task_id] = {
+                'status': 'running',
+                'total': len(session_names),
+                'done': 0,
+                'results': [],
+            }
+            t = threading.Thread(
+                target=_run_verify_sessions,
+                args=(task_id, session_names),
+                daemon=True,
+            )
+            t.start()
 
     return jsonify({
         'success': len(saved) > 0,
         'saved': saved,
         'errors': errors,
-        'message': f'{len(saved)} file(s) uploaded' + (f'; {len(errors)} error(s)' if errors else '')
+        'task_id': task_id,
+        'message': f'{len(saved)} file(s) uploaded' + (f'; {len(errors)} error(s)' if errors else ''),
     })
+
+
+@app.route('/admin/verify_sessions_status/<task_id>')
+def admin_verify_sessions_status(task_id):
+    """Poll for real-time verification results after uploading sessions."""
+    if 'user_id' not in session or session['user_id'] != '2876886938':
+        return jsonify({'success': False, 'message': 'Unauthorized'}), 401
+    task = verify_session_tasks.get(task_id)
+    if not task:
+        return jsonify({'success': False, 'message': 'Task not found'}), 404
+    return jsonify(task)
 
 
 @app.route('/admin/download_sessions', methods=['POST'])
