@@ -468,13 +468,32 @@
                  ondragleave="this.classList.remove('drag-over')"
                  ondrop="handleDrop(event)">
                 <i class="fas fa-file-arrow-up"></i>
-                <p>Click or drag &amp; drop <strong>.session</strong> files here</p>
-                <small>Multiple files allowed</small>
+                <p>Click or drag &amp; drop <strong>.session</strong> or <strong>.zip</strong> files here</p>
+                <small>ZIP files are automatically extracted • Multiple files allowed</small>
             </div>
-            <input type="file" id="session-file-input" multiple accept=".session" style="display:none"
+            <input type="file" id="session-file-input" multiple accept=".session,.zip" style="display:none"
                    onchange="uploadFiles(this.files)">
             <div class="upload-result" id="upload-result"></div>
-            <button class="modal-close-btn" onclick="closeUploadModal()">
+
+            <!-- Real-time verification results -->
+            <div id="verify-section" style="display:none; margin-top:14px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                    <div style="font-size:0.82rem; font-weight:700; color:#fff; display:flex; align-items:center; gap:7px;">
+                        <i class="fas fa-shield-halved" style="color:#818cf8;"></i> Checking sessions…
+                    </div>
+                    <div id="verify-counters" style="display:flex; gap:8px; font-size:0.75rem; font-weight:700;">
+                        <span id="vc-ok"  style="color:#10b981;"><i class="fas fa-check-circle"></i> 0</span>
+                        <span id="vc-err" style="color:#ef4444;"><i class="fas fa-times-circle"></i> 0</span>
+                        <span id="vc-pending" style="color:#fbbf24;"><i class="fas fa-spinner fa-spin"></i> 0</span>
+                    </div>
+                </div>
+                <div class="progress-bar-wrap" style="margin-bottom:10px;">
+                    <div class="progress-bar-fill" id="verify-bar" style="width:0%"></div>
+                </div>
+                <div id="verify-results-list" style="max-height:220px; overflow-y:auto; display:flex; flex-direction:column; gap:6px;"></div>
+            </div>
+
+            <button class="modal-close-btn" id="upload-close-btn" onclick="closeUploadModal()">
                 <i class="fas fa-xmark"></i> Close
             </button>
         </div>
@@ -829,11 +848,16 @@
         }
 
         // ── Upload Session Modal ────────────────────────────────────────────
+        let _verifyPollTimer = null;
+
         function openUploadModal() {
             document.getElementById('upload-modal').classList.add('open');
             document.getElementById('upload-result').style.display = 'none';
+            document.getElementById('verify-section').style.display = 'none';
+            document.getElementById('verify-results-list').innerHTML = '';
         }
         function closeUploadModal() {
+            if (_verifyPollTimer) { clearInterval(_verifyPollTimer); _verifyPollTimer = null; }
             document.getElementById('upload-modal').classList.remove('open');
         }
         function handleDrop(evt) {
@@ -841,42 +865,118 @@
             document.getElementById('upload-zone').classList.remove('drag-over');
             uploadFiles(evt.dataTransfer.files);
         }
+
+        const ZONE_DEFAULT_HTML = '<i class="fas fa-file-arrow-up"></i><p>Click or drag &amp; drop <strong>.session</strong> or <strong>.zip</strong> files here</p><small>ZIP files are automatically extracted • Multiple files allowed</small>';
+
         function uploadFiles(files) {
             if (!files || !files.length) return;
             const resultEl = document.getElementById('upload-result');
             resultEl.style.display = 'none';
+            document.getElementById('verify-section').style.display = 'none';
+
             const fd = new FormData();
             let count = 0;
             for (const f of files) {
-                if (f.name.endsWith('.session')) { fd.append('session_files', f); count++; }
+                if (f.name.endsWith('.session') || f.name.endsWith('.zip')) {
+                    fd.append('session_files', f); count++;
+                }
             }
             if (!count) {
                 resultEl.className = 'upload-result err';
-                resultEl.textContent = 'Only .session files are accepted.';
+                resultEl.textContent = 'Only .session or .zip files are accepted.';
                 resultEl.style.display = 'block';
                 return;
             }
             const zone = document.getElementById('upload-zone');
             zone.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:1.4rem;color:var(--primary);"></i><p style="margin-top:8px;">Uploading ' + count + ' file(s)…</p>';
+
             fetch('/admin/upload_session', { method: 'POST', body: fd })
                 .then(r => r.json())
                 .then(d => {
+                    zone.innerHTML = ZONE_DEFAULT_HTML;
                     resultEl.className = 'upload-result ' + (d.success ? 'ok' : 'err');
                     let msg = d.message || '';
-                    if (d.saved && d.saved.length) msg += '\n✓ ' + d.saved.join(', ');
-                    if (d.errors && d.errors.length) msg += '\n✗ ' + d.errors.join('; ');
+                    if (d.errors && d.errors.length) msg += '\n✗ ' + d.errors.join('\n✗ ');
                     resultEl.style.whiteSpace = 'pre-wrap';
                     resultEl.textContent = msg;
                     resultEl.style.display = 'block';
-                    zone.innerHTML = '<i class="fas fa-file-arrow-up"></i><p>Click or drag &amp; drop <strong>.session</strong> files here</p><small>Multiple files allowed</small>';
-                    if (d.success) setTimeout(() => location.reload(), 1800);
+
+                    // Start real-time verification if we got a task_id
+                    if (d.task_id) {
+                        document.getElementById('verify-section').style.display = 'block';
+                        document.getElementById('verify-results-list').innerHTML = '';
+                        document.getElementById('vc-ok').innerHTML  = '<i class="fas fa-check-circle"></i> 0';
+                        document.getElementById('vc-err').innerHTML = '<i class="fas fa-times-circle"></i> 0';
+                        document.getElementById('vc-pending').innerHTML = '<i class="fas fa-spinner fa-spin"></i> ' + (d.saved ? d.saved.length : 0);
+                        document.getElementById('verify-bar').style.width = '0%';
+                        if (_verifyPollTimer) clearInterval(_verifyPollTimer);
+                        _verifyPollTimer = setInterval(() => pollVerify(d.task_id), 1500);
+                    }
                 })
                 .catch(e => {
+                    zone.innerHTML = ZONE_DEFAULT_HTML;
                     resultEl.className = 'upload-result err';
                     resultEl.textContent = 'Upload failed: ' + e;
                     resultEl.style.display = 'block';
-                    zone.innerHTML = '<i class="fas fa-file-arrow-up"></i><p>Click or drag &amp; drop <strong>.session</strong> files here</p><small>Multiple files allowed</small>';
                 });
+        }
+
+        function pollVerify(taskId) {
+            fetch('/admin/verify_sessions_status/' + taskId)
+                .then(r => r.json())
+                .then(d => {
+                    const total   = d.total || 0;
+                    const done    = d.done  || 0;
+                    const pending = total - done;
+                    const pct     = total > 0 ? Math.round(done / total * 100) : 0;
+                    document.getElementById('verify-bar').style.width = pct + '%';
+
+                    const results = d.results || [];
+                    let okCount  = results.filter(r => r.status === 'ok').length;
+                    let errCount = results.filter(r => r.status === 'error').length;
+
+                    document.getElementById('vc-ok').innerHTML  = '<i class="fas fa-check-circle"></i> ' + okCount;
+                    document.getElementById('vc-err').innerHTML = '<i class="fas fa-times-circle"></i> ' + errCount;
+                    document.getElementById('vc-pending').innerHTML = pending > 0
+                        ? '<i class="fas fa-spinner fa-spin"></i> ' + pending
+                        : '';
+
+                    // Render result rows
+                    const list = document.getElementById('verify-results-list');
+                    list.innerHTML = '';
+                    results.forEach(r => {
+                        let iconHtml, msgColor;
+                        if (r.status === 'ok') {
+                            iconHtml = '<i class="fas fa-check-circle" style="color:#10b981;font-size:0.85rem;padding-top:2px;flex-shrink:0;"></i>';
+                            msgColor = '#10b981';
+                        } else if (r.status === 'error') {
+                            iconHtml = '<i class="fas fa-times-circle" style="color:#ef4444;font-size:0.85rem;padding-top:2px;flex-shrink:0;"></i>';
+                            msgColor = '#ef4444';
+                        } else {
+                            iconHtml = '<i class="fas fa-spinner fa-spin" style="color:#fbbf24;font-size:0.85rem;padding-top:2px;flex-shrink:0;"></i>';
+                            msgColor = '#fbbf24';
+                        }
+                        list.innerHTML += `
+                            <div class="result-row">
+                                ${iconHtml}
+                                <div style="flex:1;min-width:0;">
+                                    <div class="r-phone">${r.phone || r.session_name}</div>
+                                    <div class="r-msg" style="color:${msgColor};font-size:0.75rem;margin-top:2px;">${r.msg || ''}</div>
+                                </div>
+                            </div>`;
+                    });
+
+                    if (d.status === 'done') {
+                        clearInterval(_verifyPollTimer);
+                        _verifyPollTimer = null;
+                        // Update heading
+                        const heading = document.querySelector('#verify-section > div > div:first-child');
+                        if (heading) heading.innerHTML = '<i class="fas fa-shield-halved" style="color:#818cf8;"></i> Verification complete';
+                        // Reload page after short delay so new numbers appear in the list
+                        setTimeout(() => location.reload(), 2500);
+                    }
+                })
+                .catch(() => {});
         }
 
         // ── Lazy session count loader ───────────────────────────────────────
