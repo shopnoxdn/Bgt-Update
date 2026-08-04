@@ -95,6 +95,46 @@
         }
         .btn-bulk-logout:hover { background: #dc2626; }
         .btn-bulk-logout:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-bulk-download {
+            padding: 7px 14px; background: rgba(59,130,246,0.15); color: #60a5fa;
+            border: 1px solid rgba(59,130,246,0.3); border-radius: 8px; font-weight: 600; font-size: 0.8rem;
+            cursor: pointer; font-family: 'Inter', sans-serif; transition: all 0.2s;
+            display: flex; align-items: center; gap: 6px;
+        }
+        .btn-bulk-download:hover { background: rgba(59,130,246,0.28); color: #93c5fd; border-color: #3b82f6; }
+        .btn-bulk-download:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-upload-session {
+            padding: 7px 14px; background: rgba(99,102,241,0.12); color: #818cf8;
+            border: 1px solid rgba(99,102,241,0.3); border-radius: 8px; font-weight: 600; font-size: 0.8rem;
+            cursor: pointer; font-family: 'Inter', sans-serif; transition: all 0.2s;
+            display: flex; align-items: center; gap: 6px; text-decoration: none;
+        }
+        .btn-upload-session:hover { background: rgba(99,102,241,0.22); color: #a5b4fc; border-color: #6366f1; }
+
+        /* Session count badge */
+        .session-count-badge {
+            display: inline-flex; align-items: center; gap: 3px;
+            background: rgba(59,130,246,0.1); color: #60a5fa;
+            border: 1px solid rgba(59,130,246,0.25);
+            border-radius: 6px; padding: 2px 7px;
+            font-size: 0.66rem; font-weight: 700; flex-shrink: 0;
+        }
+        .session-count-badge.loading { color: var(--text-dim); background: var(--surface-2); border-color: var(--border); }
+        .session-count-badge.count-0 { color: #f87171; background: rgba(239,68,68,0.08); border-color: rgba(239,68,68,0.2); }
+
+        /* Upload modal */
+        .upload-zone {
+            border: 2px dashed var(--border); border-radius: 12px;
+            padding: 28px 16px; text-align: center; cursor: pointer;
+            transition: all 0.2s; margin-bottom: 14px;
+        }
+        .upload-zone:hover, .upload-zone.drag-over { border-color: var(--primary); background: rgba(99,102,241,0.06); }
+        .upload-zone i { font-size: 1.8rem; color: var(--primary); margin-bottom: 8px; display: block; }
+        .upload-zone p { font-size: 0.83rem; color: var(--text-dim); margin-bottom: 4px; }
+        .upload-zone small { font-size: 0.73rem; color: #475569; }
+        .upload-result { font-size: 0.82rem; margin-top: 10px; padding: 8px 12px; border-radius: 8px; display: none; }
+        .upload-result.ok  { background: rgba(16,185,129,0.1); color: #10b981; border: 1px solid rgba(16,185,129,0.2); }
+        .upload-result.err { background: rgba(239,68,68,0.1);  color: #f87171; border: 1px solid rgba(239,68,68,0.2); }
 
         /* ── COMPACT NUMBER GRID ── */
         .numbers-list {
@@ -276,6 +316,9 @@
             <i class="fas fa-mobile-screen-button"></i> Active Numbers
         </div>
         <div class="navbar-actions">
+            <a href="#" class="btn-upload-session" onclick="openUploadModal(); return false;" style="padding:6px 12px;">
+                <i class="fas fa-upload"></i> Upload Session
+            </a>
             <a href="/admin"><i class="fas fa-arrow-left"></i> Admin Panel</a>
             <a href="/logout"><i class="fas fa-sign-out-alt"></i> Logout</a>
         </div>
@@ -322,6 +365,9 @@
                 <button class="btn-bulk-logout" id="bulk-logout-btn" disabled onclick="startBulkLogout()">
                     <i class="fas fa-right-from-bracket"></i> Logout (Selected)
                 </button>
+                <button class="btn-bulk-download" id="bulk-download-btn" disabled onclick="downloadSelected()">
+                    <i class="fas fa-download"></i> Download Sessions (ZIP)
+                </button>
             </div>
         </div>
 
@@ -338,6 +384,10 @@
                     <div class="card-row1">
                         <div class="serial-badge">#{{ num.serial }}</div>
                         <div class="phone-number">{{ num.display_phone }}</div>
+                        <span class="session-count-badge loading" id="sc-{{ num.session_name }}"
+                            title="Active Telegram sessions (devices logged in)">
+                            <i class="fas fa-spinner fa-spin" style="font-size:0.6rem;"></i>
+                        </span>
                         {% if num.email_changed %}
                         <span class="email-badge"><i class="fas fa-envelope-circle-check"></i> Email Changed</span>
                         {% endif %}
@@ -409,6 +459,27 @@
         </div>
     </div>
 
+    <!-- Upload Session Modal -->
+    <div class="modal-overlay" id="upload-modal">
+        <div class="modal-box" style="max-width:460px;">
+            <div class="modal-title"><i class="fas fa-upload" style="color:#818cf8"></i> Upload Session Files</div>
+            <div class="upload-zone" id="upload-zone" onclick="document.getElementById('session-file-input').click()"
+                 ondragover="event.preventDefault(); this.classList.add('drag-over')"
+                 ondragleave="this.classList.remove('drag-over')"
+                 ondrop="handleDrop(event)">
+                <i class="fas fa-file-arrow-up"></i>
+                <p>Click or drag &amp; drop <strong>.session</strong> files here</p>
+                <small>Multiple files allowed</small>
+            </div>
+            <input type="file" id="session-file-input" multiple accept=".session" style="display:none"
+                   onchange="uploadFiles(this.files)">
+            <div class="upload-result" id="upload-result"></div>
+            <button class="modal-close-btn" onclick="closeUploadModal()">
+                <i class="fas fa-xmark"></i> Close
+            </button>
+        </div>
+    </div>
+
     <!-- Detail Drawer -->
     <div class="drawer-overlay" id="drawer-overlay" onclick="closeDrawer()"></div>
     <div class="drawer-panel" id="drawer-panel">
@@ -437,16 +508,19 @@
             const btn = document.getElementById('bulk-email-btn');
             const countEl = document.getElementById('sel-count');
             const selectAll = document.getElementById('select-all');
-
             const logoutBtn = document.getElementById('bulk-logout-btn');
+            const dlBtn = document.getElementById('bulk-download-btn');
+
             if (checked.length > 0) {
                 btn.disabled = false;
                 if (logoutBtn) logoutBtn.disabled = false;
+                if (dlBtn) dlBtn.disabled = false;
                 countEl.style.display = 'inline';
                 countEl.textContent = checked.length + ' selected';
             } else {
                 btn.disabled = true;
                 if (logoutBtn) logoutBtn.disabled = true;
+                if (dlBtn) dlBtn.disabled = true;
                 countEl.style.display = 'none';
             }
             selectAll.indeterminate = checked.length > 0 && checked.length < total;
@@ -719,6 +793,128 @@
                     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-right-from-bracket"></i> Logout'; }
                 });
         }
+
+        // ── Bulk Download Sessions (ZIP) ────────────────────────────────────
+        function downloadSelected() {
+            const phones = getChecked();
+            if (!phones.length) return;
+            const btn = document.getElementById('bulk-download-btn');
+            if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Preparing ZIP…'; }
+            fetch('/admin/download_sessions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({phones: phones})
+            })
+            .then(r => {
+                if (!r.ok) return r.json().then(d => { throw new Error(d.message || 'Download failed'); });
+                return r.blob();
+            })
+            .then(blob => {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                const ts = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+                a.download = 'sessions_' + ts + '.zip';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                showToast('<i class="fas fa-check-circle" style="color:#10b981"></i> ' + phones.length + ' session(s) downloaded', '#10b981');
+            })
+            .catch(e => showToast('<i class="fas fa-times-circle" style="color:#ef4444"></i> ' + e.message, '#ef4444'))
+            .finally(() => {
+                if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-download"></i> Download Sessions (ZIP)'; }
+                onCheckChange(); // re-evaluate disabled state
+            });
+        }
+
+        // ── Upload Session Modal ────────────────────────────────────────────
+        function openUploadModal() {
+            document.getElementById('upload-modal').classList.add('open');
+            document.getElementById('upload-result').style.display = 'none';
+        }
+        function closeUploadModal() {
+            document.getElementById('upload-modal').classList.remove('open');
+        }
+        function handleDrop(evt) {
+            evt.preventDefault();
+            document.getElementById('upload-zone').classList.remove('drag-over');
+            uploadFiles(evt.dataTransfer.files);
+        }
+        function uploadFiles(files) {
+            if (!files || !files.length) return;
+            const resultEl = document.getElementById('upload-result');
+            resultEl.style.display = 'none';
+            const fd = new FormData();
+            let count = 0;
+            for (const f of files) {
+                if (f.name.endsWith('.session')) { fd.append('session_files', f); count++; }
+            }
+            if (!count) {
+                resultEl.className = 'upload-result err';
+                resultEl.textContent = 'Only .session files are accepted.';
+                resultEl.style.display = 'block';
+                return;
+            }
+            const zone = document.getElementById('upload-zone');
+            zone.innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:1.4rem;color:var(--primary);"></i><p style="margin-top:8px;">Uploading ' + count + ' file(s)…</p>';
+            fetch('/admin/upload_session', { method: 'POST', body: fd })
+                .then(r => r.json())
+                .then(d => {
+                    resultEl.className = 'upload-result ' + (d.success ? 'ok' : 'err');
+                    let msg = d.message || '';
+                    if (d.saved && d.saved.length) msg += '\n✓ ' + d.saved.join(', ');
+                    if (d.errors && d.errors.length) msg += '\n✗ ' + d.errors.join('; ');
+                    resultEl.style.whiteSpace = 'pre-wrap';
+                    resultEl.textContent = msg;
+                    resultEl.style.display = 'block';
+                    zone.innerHTML = '<i class="fas fa-file-arrow-up"></i><p>Click or drag &amp; drop <strong>.session</strong> files here</p><small>Multiple files allowed</small>';
+                    if (d.success) setTimeout(() => location.reload(), 1800);
+                })
+                .catch(e => {
+                    resultEl.className = 'upload-result err';
+                    resultEl.textContent = 'Upload failed: ' + e;
+                    resultEl.style.display = 'block';
+                    zone.innerHTML = '<i class="fas fa-file-arrow-up"></i><p>Click or drag &amp; drop <strong>.session</strong> files here</p><small>Multiple files allowed</small>';
+                });
+        }
+
+        // ── Lazy session count loader ───────────────────────────────────────
+        const _scQueue = [];   // session names to fetch
+        let _scActive = 0;
+        const _SC_CONCURRENCY = 4;  // fetch 4 at a time
+
+        function _scProcessQueue() {
+            while (_scActive < _SC_CONCURRENCY && _scQueue.length) {
+                const name = _scQueue.shift();
+                _scActive++;
+                fetch('/admin/session_count/' + encodeURIComponent(name))
+                    .then(r => r.json())
+                    .then(d => {
+                        const el = document.getElementById('sc-' + name);
+                        if (!el) return;
+                        const count = d.count || 0;
+                        el.classList.remove('loading');
+                        if (count === 0) el.classList.add('count-0');
+                        el.innerHTML = '<i class="fas fa-mobile-screen-button" style="font-size:0.58rem;"></i> ' + count;
+                        el.title = count + ' device(s) logged in to Telegram';
+                    })
+                    .catch(() => {
+                        const el = document.getElementById('sc-' + name);
+                        if (el) { el.classList.remove('loading'); el.style.display = 'none'; }
+                    })
+                    .finally(() => { _scActive--; _scProcessQueue(); });
+            }
+        }
+
+        // Enqueue all cards on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            document.querySelectorAll('.session-count-badge').forEach(el => {
+                const name = el.id.replace('sc-', '');
+                if (name) _scQueue.push(name);
+            });
+            _scProcessQueue();
+        });
     </script>
 </body>
 </html>

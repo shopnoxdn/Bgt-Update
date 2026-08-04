@@ -1,4 +1,6 @@
 import os
+import io
+import zipfile
 import json
 import hashlib
 import asyncio
@@ -1572,6 +1574,98 @@ def admin_bulk_logout_status(task_id):
     if not task:
         return jsonify({'success': False, 'message': 'Task not found'}), 404
     return jsonify(task)
+
+
+@app.route('/admin/session_count/<path:phone>')
+async def admin_session_count(phone):
+    """Return the number of active Telegram authorizations for a session."""
+    if 'user_id' not in session or session['user_id'] != '2876886938':
+        return jsonify({'success': False, 'count': 0}), 401
+
+    # Validate: must have an actual session file
+    session_path = os.path.join(SESSIONS_DIR, phone)
+    if not os.path.exists(session_path + '.session'):
+        return jsonify({'success': False, 'count': 0, 'message': 'Session file not found'}), 404
+
+    client = TelegramClient(session_path, API_ID, API_HASH)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            return jsonify({'success': True, 'count': 0, 'authorized': False})
+        auths = await client(functions.account.GetAuthorizationsRequest())
+        count = len(auths.authorizations)
+        return jsonify({'success': True, 'count': count, 'authorized': True})
+    except Exception as e:
+        return jsonify({'success': False, 'count': 0, 'message': str(e)}), 500
+    finally:
+        if client.is_connected():
+            await client.disconnect()
+
+
+@app.route('/admin/upload_session', methods=['POST'])
+def admin_upload_session():
+    """Upload one or more .session files into the sessions directory."""
+    if 'user_id' not in session or session['user_id'] != '2876886938':
+        return jsonify({'success': False, 'message': 'Unauthorized'}), 401
+
+    files = request.files.getlist('session_files')
+    if not files:
+        return jsonify({'success': False, 'message': 'No files provided'}), 400
+
+    saved = []
+    errors = []
+    for f in files:
+        fname = f.filename or ''
+        # Accept only .session files; strip any path component
+        fname = os.path.basename(fname)
+        if not fname.endswith('.session'):
+            errors.append(f'{fname}: not a .session file')
+            continue
+        # Block path traversal
+        if '..' in fname or '/' in fname or '\\' in fname:
+            errors.append(f'{fname}: invalid filename')
+            continue
+        dest = os.path.join(SESSIONS_DIR, fname)
+        try:
+            f.save(dest)
+            saved.append(fname)
+        except Exception as e:
+            errors.append(f'{fname}: {e}')
+
+    return jsonify({
+        'success': len(saved) > 0,
+        'saved': saved,
+        'errors': errors,
+        'message': f'{len(saved)} file(s) uploaded' + (f'; {len(errors)} error(s)' if errors else '')
+    })
+
+
+@app.route('/admin/download_sessions', methods=['POST'])
+def admin_download_sessions():
+    """Return a ZIP containing the .session files for the given session names."""
+    if 'user_id' not in session or session['user_id'] != '2876886938':
+        return jsonify({'success': False, 'message': 'Unauthorized'}), 401
+
+    data = request.get_json()
+    phones = _sanitize_session_names(data.get('phones', []) if data else [])
+    if not phones:
+        return jsonify({'success': False, 'message': 'No valid session names provided'}), 400
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for name in phones:
+            src = os.path.join(SESSIONS_DIR, name + '.session')
+            if os.path.exists(src):
+                zf.write(src, arcname=name + '.session')
+    buf.seek(0)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    zip_name = f'sessions_{timestamp}.zip'
+    return send_file(
+        buf,
+        mimetype='application/zip',
+        as_attachment=True,
+        download_name=zip_name
+    )
 
 
 if __name__ == '__main__':
