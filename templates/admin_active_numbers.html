@@ -110,6 +110,41 @@
             display: flex; align-items: center; gap: 6px; text-decoration: none;
         }
         .btn-upload-session:hover { background: rgba(99,102,241,0.22); color: #a5b4fc; border-color: #6366f1; }
+        .btn-bulk-2fa-off {
+            padding: 7px 14px; background: rgba(245,158,11,0.12); color: #fbbf24;
+            border: 1px solid rgba(245,158,11,0.3); border-radius: 8px; font-weight: 600; font-size: 0.8rem;
+            cursor: pointer; font-family: 'Inter', sans-serif; transition: all 0.2s;
+            display: flex; align-items: center; gap: 6px;
+        }
+        .btn-bulk-2fa-off:hover  { background: rgba(245,158,11,0.24); color: #fde68a; border-color: #f59e0b; }
+        .btn-bulk-2fa-off:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-bulk-2fa-on {
+            padding: 7px 14px; background: rgba(16,185,129,0.12); color: #34d399;
+            border: 1px solid rgba(16,185,129,0.3); border-radius: 8px; font-weight: 600; font-size: 0.8rem;
+            cursor: pointer; font-family: 'Inter', sans-serif; transition: all 0.2s;
+            display: flex; align-items: center; gap: 6px;
+        }
+        .btn-bulk-2fa-on:hover   { background: rgba(16,185,129,0.24); color: #6ee7b7; border-color: #10b981; }
+        .btn-bulk-2fa-on:disabled { opacity: 0.5; cursor: not-allowed; }
+        /* 2FA modal input styles */
+        .modal-field { margin-bottom: 12px; }
+        .modal-field label { display: block; font-size: 0.78rem; color: var(--text-dim); margin-bottom: 5px; font-weight: 600; }
+        .modal-field input {
+            width: 100%; padding: 9px 12px; background: var(--surface-2);
+            border: 1px solid var(--border); color: #fff; border-radius: 9px;
+            font-family: 'Inter', sans-serif; font-size: 0.85rem; outline: none;
+            transition: border-color 0.2s;
+        }
+        .modal-field input:focus { border-color: var(--primary); }
+        .btn-modal-action {
+            width: 100%; padding: 10px; background: var(--primary); border: none;
+            color: #fff; border-radius: 10px; font-weight: 700; font-size: 0.88rem;
+            cursor: pointer; font-family: 'Inter', sans-serif; transition: all 0.2s;
+            margin-bottom: 8px;
+        }
+        .btn-modal-action:hover { background: var(--primary-light); }
+        .btn-modal-action.danger { background: rgba(239,68,68,0.85); }
+        .btn-modal-action.danger:hover { background: #ef4444; }
 
         /* Session count badge */
         .session-count-badge {
@@ -368,6 +403,12 @@
                 <button class="btn-bulk-download" id="bulk-download-btn" disabled onclick="downloadSelected()">
                     <i class="fas fa-download"></i> Download Sessions (ZIP)
                 </button>
+                <button class="btn-bulk-2fa-off" id="bulk-2fa-off-btn" disabled onclick="open2faModal('disable')">
+                    <i class="fas fa-lock-open"></i> 2FA Off
+                </button>
+                <button class="btn-bulk-2fa-on" id="bulk-2fa-on-btn" disabled onclick="open2faModal('enable')">
+                    <i class="fas fa-lock"></i> 2FA On
+                </button>
             </div>
         </div>
 
@@ -499,6 +540,56 @@
         </div>
     </div>
 
+    <!-- Bulk 2FA Setup Modal (disable or enable) -->
+    <div class="modal-overlay" id="bulk-2fa-setup-modal">
+        <div class="modal-box" style="max-width:420px;">
+            <div class="modal-title" id="bulk-2fa-modal-title">
+                <i class="fas fa-lock-open" style="color:#fbbf24"></i> Bulk 2FA
+            </div>
+            <!-- Disable fields -->
+            <div id="2fa-disable-fields">
+                <div class="modal-field">
+                    <label>Current 2FA Password</label>
+                    <input type="password" id="2fa-current-pw" placeholder="Enter current password" autocomplete="current-password">
+                </div>
+            </div>
+            <!-- Enable fields -->
+            <div id="2fa-enable-fields" style="display:none;">
+                <div class="modal-field">
+                    <label>New 2FA Password</label>
+                    <input type="password" id="2fa-new-pw" placeholder="Enter new password" autocomplete="new-password">
+                </div>
+                <div class="modal-field">
+                    <label>Hint <span style="color:var(--text-dim);font-weight:400;">(optional)</span></label>
+                    <input type="text" id="2fa-hint" placeholder="Password hint">
+                </div>
+            </div>
+            <button class="btn-modal-action" id="bulk-2fa-confirm-btn" onclick="startBulk2fa()">
+                <i class="fas fa-play"></i> Start
+            </button>
+            <button class="modal-close-btn" onclick="close2faSetupModal()">
+                <i class="fas fa-xmark"></i> Cancel
+            </button>
+        </div>
+    </div>
+
+    <!-- Bulk 2FA Progress Modal -->
+    <div class="modal-overlay" id="bulk-2fa-progress-modal">
+        <div class="modal-box">
+            <div class="modal-title" id="bulk-2fa-progress-title">
+                <i class="fas fa-lock-open" style="color:#fbbf24"></i> Bulk 2FA Change
+            </div>
+            <div class="progress-bar-wrap">
+                <div class="progress-bar-fill" id="bulk-2fa-bar" style="width:0%"></div>
+            </div>
+            <div class="progress-label" id="bulk-2fa-progress-label">Starting…</div>
+            <div id="bulk-2fa-results-list"></div>
+            <button class="modal-close-btn" id="bulk-2fa-close-btn" onclick="closeBulk2faProgressModal()" style="display:none;">
+                <i class="fas fa-check"></i> Done — Close
+            </button>
+        </div>
+    </div>
+
     <!-- Detail Drawer -->
     <div class="drawer-overlay" id="drawer-overlay" onclick="closeDrawer()"></div>
     <div class="drawer-panel" id="drawer-panel">
@@ -528,18 +619,24 @@
             const countEl = document.getElementById('sel-count');
             const selectAll = document.getElementById('select-all');
             const logoutBtn = document.getElementById('bulk-logout-btn');
-            const dlBtn = document.getElementById('bulk-download-btn');
+            const dlBtn    = document.getElementById('bulk-download-btn');
+            const twoOffBtn = document.getElementById('bulk-2fa-off-btn');
+            const twoOnBtn  = document.getElementById('bulk-2fa-on-btn');
 
             if (checked.length > 0) {
                 btn.disabled = false;
-                if (logoutBtn) logoutBtn.disabled = false;
-                if (dlBtn) dlBtn.disabled = false;
+                if (logoutBtn)  logoutBtn.disabled  = false;
+                if (dlBtn)      dlBtn.disabled      = false;
+                if (twoOffBtn)  twoOffBtn.disabled  = false;
+                if (twoOnBtn)   twoOnBtn.disabled   = false;
                 countEl.style.display = 'inline';
                 countEl.textContent = checked.length + ' selected';
             } else {
                 btn.disabled = true;
-                if (logoutBtn) logoutBtn.disabled = true;
-                if (dlBtn) dlBtn.disabled = true;
+                if (logoutBtn)  logoutBtn.disabled  = true;
+                if (dlBtn)      dlBtn.disabled      = true;
+                if (twoOffBtn)  twoOffBtn.disabled  = true;
+                if (twoOnBtn)   twoOnBtn.disabled   = true;
                 countEl.style.display = 'none';
             }
             selectAll.indeterminate = checked.length > 0 && checked.length < total;
@@ -845,6 +942,130 @@
                 if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-download"></i> Download Sessions (ZIP)'; }
                 onCheckChange(); // re-evaluate disabled state
             });
+        }
+
+        // ── Bulk 2FA ───────────────────────────────────────────────────────
+        let _bulk2faAction = '';
+        let _bulk2faPollTimer = null;
+
+        function open2faModal(action) {
+            _bulk2faAction = action;
+            const title   = document.getElementById('bulk-2fa-modal-title');
+            const disF    = document.getElementById('2fa-disable-fields');
+            const enF     = document.getElementById('2fa-enable-fields');
+            const confBtn = document.getElementById('bulk-2fa-confirm-btn');
+            if (action === 'disable') {
+                title.innerHTML   = '<i class="fas fa-lock-open" style="color:#fbbf24"></i> Bulk 2FA — Disable';
+                disF.style.display = 'block';
+                enF.style.display  = 'none';
+                confBtn.className  = 'btn-modal-action danger';
+                confBtn.innerHTML  = '<i class="fas fa-lock-open"></i> Disable 2FA for selected';
+                document.getElementById('2fa-current-pw').value = '';
+            } else {
+                title.innerHTML   = '<i class="fas fa-lock" style="color:#34d399"></i> Bulk 2FA — Enable';
+                disF.style.display = 'none';
+                enF.style.display  = 'block';
+                confBtn.className  = 'btn-modal-action';
+                confBtn.innerHTML  = '<i class="fas fa-lock"></i> Enable 2FA for selected';
+                document.getElementById('2fa-new-pw').value = '';
+                document.getElementById('2fa-hint').value   = '';
+            }
+            document.getElementById('bulk-2fa-setup-modal').classList.add('open');
+        }
+        function close2faSetupModal() {
+            document.getElementById('bulk-2fa-setup-modal').classList.remove('open');
+        }
+        function closeBulk2faProgressModal() {
+            if (_bulk2faPollTimer) { clearInterval(_bulk2faPollTimer); _bulk2faPollTimer = null; }
+            document.getElementById('bulk-2fa-progress-modal').classList.remove('open');
+        }
+
+        function startBulk2fa() {
+            const phones = getChecked();
+            if (!phones.length) return;
+
+            let password = '', new_password = '', hint = '';
+            if (_bulk2faAction === 'disable') {
+                password = document.getElementById('2fa-current-pw').value.trim();
+                if (!password) { alert('Current password is required to disable 2FA.'); return; }
+            } else {
+                new_password = document.getElementById('2fa-new-pw').value.trim();
+                if (!new_password) { alert('New password is required to enable 2FA.'); return; }
+                hint = document.getElementById('2fa-hint').value.trim();
+            }
+
+            const label = _bulk2faAction === 'disable' ? 'DISABLE' : 'ENABLE';
+            if (!confirm(`${label} 2FA for ${phones.length} account(s)?`)) return;
+
+            close2faSetupModal();
+
+            const progTitle = document.getElementById('bulk-2fa-progress-title');
+            progTitle.innerHTML = _bulk2faAction === 'disable'
+                ? '<i class="fas fa-lock-open" style="color:#fbbf24"></i> Disabling 2FA…'
+                : '<i class="fas fa-lock" style="color:#34d399"></i> Enabling 2FA…';
+            document.getElementById('bulk-2fa-results-list').innerHTML = '';
+            document.getElementById('bulk-2fa-bar').style.width = '0%';
+            document.getElementById('bulk-2fa-progress-label').textContent = 'Starting…';
+            document.getElementById('bulk-2fa-close-btn').style.display = 'none';
+            document.getElementById('bulk-2fa-progress-modal').classList.add('open');
+
+            fetch('/admin/bulk_2fa', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ phones, action: _bulk2faAction, password, new_password, hint })
+            })
+            .then(r => r.json())
+            .then(d => {
+                if (!d.success) { alert(d.message); closeBulk2faProgressModal(); return; }
+                if (_bulk2faPollTimer) clearInterval(_bulk2faPollTimer);
+                _bulk2faPollTimer = setInterval(() => pollBulk2fa(d.task_id), 1500);
+            })
+            .catch(e => { alert('Error: ' + e); closeBulk2faProgressModal(); });
+        }
+
+        function pollBulk2fa(taskId) {
+            fetch('/admin/bulk_2fa_status/' + taskId)
+            .then(r => r.json())
+            .then(d => {
+                const total = d.total || 0;
+                const done  = d.done  || 0;
+                const pct   = total > 0 ? Math.round(done / total * 100) : 0;
+                document.getElementById('bulk-2fa-bar').style.width = pct + '%';
+                document.getElementById('bulk-2fa-progress-label').textContent = `${done} / ${total} accounts processed`;
+
+                const list = document.getElementById('bulk-2fa-results-list');
+                list.innerHTML = '';
+                (d.results || []).forEach(r => {
+                    let iconHtml, msgColor;
+                    if (r.status === 'done') {
+                        iconHtml = '<i class="fas fa-check-circle r-icon" style="color:#10b981"></i>';
+                        msgColor = '#10b981';
+                    } else if (r.status === 'error') {
+                        iconHtml = '<i class="fas fa-times-circle r-icon" style="color:#ef4444"></i>';
+                        msgColor = '#ef4444';
+                    } else {
+                        iconHtml = '<i class="fas fa-spinner spin r-icon" style="color:#fbbf24"></i>';
+                        msgColor = '#fbbf24';
+                    }
+                    list.innerHTML += `
+                        <div class="result-row">
+                            ${iconHtml}
+                            <div style="flex:1;min-width:0;">
+                                <div class="r-phone">${r.phone}</div>
+                                <div class="r-msg" style="color:${msgColor};">${r.msg || ''}</div>
+                            </div>
+                        </div>`;
+                });
+
+                if (d.status === 'done') {
+                    clearInterval(_bulk2faPollTimer);
+                    _bulk2faPollTimer = null;
+                    const label = d.action === 'disable' ? 'disabled' : 'enabled';
+                    document.getElementById('bulk-2fa-progress-label').textContent = `✅ All ${total} accounts processed!`;
+                    document.getElementById('bulk-2fa-close-btn').style.display = 'block';
+                }
+            })
+            .catch(() => {});
         }
 
         // ── Upload Session Modal ────────────────────────────────────────────
